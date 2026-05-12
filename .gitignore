@@ -1,0 +1,8 @@
+node_modules/
+dist/
+
+# Local environment/config
+.env
+
+# Local tooling state
+.index-state.json
