@@ -11,6 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ensureCollection, search, getQdrantClient } from "./qdrant.js";
 import { embed } from "./embedder.js";
+import { createSparseVector } from "./sparse.js";
 import { readIndexState } from "./state.js";
 import { reindexCommand } from "./reindex.js";
 import { rerank } from "./reranker.js";
@@ -130,10 +131,11 @@ async function handleSearchCode(args: Record<string, unknown>) {
   }
 
   const vectors = await embed([query]);
+  const sparseVector = createSparseVector(query);
 
-  // Search with a wider window (3x limit) to give reranker more candidates
+  // Hybrid search with a wider window (3x limit) gives the reranker more candidates.
   const searchLimit = Math.min(limit * 3, 50);
-  const results = await search(vectors[0], repo, searchLimit);
+  const results = await search(vectors[0], sparseVector, repo, searchLimit);
 
   // Rerank if enabled — reranker returns re-ordered indices
   if (results.length > 0) {

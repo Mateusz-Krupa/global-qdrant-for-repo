@@ -4,9 +4,11 @@ const RERANKER_API_KEY = process.env.RERANKER_API_KEY || "";
 
 const MAX_RETRIES = 5;
 const TIMEOUT_MS = 30_000;
-const COHERE_RERANK_URL = process.env.RERANKER_URL
-  ? `${process.env.RERANKER_URL}/rerank`
-  : "https://api.cohere.com/v2/rerank";
+function getRerankUrl(): string {
+  const baseUrl = process.env.RERANKER_URL;
+  if (!baseUrl) return "https://api.cohere.com/v2/rerank";
+  return `${baseUrl.replace(/\/$/, "")}/rerank`;
+}
 
 export function isRerankerEnabled(): boolean {
   return RERANKER_PROVIDER !== "none" && RERANKER_API_KEY.length > 0;
@@ -19,7 +21,25 @@ function passthrough(
   return documents.slice(0, topN).map((d) => d.index);
 }
 
-async function rerankWithCohere(
+function parseRerankResponse(data: unknown): number[] | null {
+  if (!data || typeof data !== "object") return null;
+
+  const body = data as {
+    results?: Array<{ index?: number; relevance_score?: number; score?: number }>;
+    data?: Array<{ index?: number; relevance_score?: number; score?: number }>;
+  };
+  const results = body.results ?? body.data;
+  if (!Array.isArray(results)) return null;
+
+  return results
+    .filter((result): result is { index: number; relevance_score?: number; score?: number } =>
+      typeof result.index === "number",
+    )
+    .sort((a, b) => (b.relevance_score ?? b.score ?? 0) - (a.relevance_score ?? a.score ?? 0))
+    .map((result) => result.index);
+}
+
+async function rerankWithHttpProvider(
   query: string,
   documents: Array<{ text: string; index: number }>,
   topN: number,
@@ -35,7 +55,7 @@ async function rerankWithCohere(
   try {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const response = await fetch(COHERE_RERANK_URL, {
+        const response = await fetch(getRerankUrl(), {
           method: "POST",
           headers: {
             Authorization: `Bearer ${RERANKER_API_KEY}`,
@@ -53,7 +73,7 @@ async function rerankWithCohere(
         if (response.status === 429) {
           if (attempt === MAX_RETRIES) {
             console.error(
-              "[ERROR] Cohere rerank rate limit exhausted; falling back to passthrough",
+              "[ERROR] Rerank rate limit exhausted; falling back to passthrough",
             );
             return passthrough(documents, topN);
           }
@@ -68,23 +88,29 @@ async function rerankWithCohere(
         if (!response.ok) {
           const body = await response.text().catch(() => "unknown");
           console.error(
-            `[ERROR] Cohere rerank API error (${response.status}): ${body}; falling back to passthrough`,
+            `[ERROR] Rerank API error (${response.status}): ${body}; falling back to passthrough`,
           );
           return passthrough(documents, topN);
         }
 
-        const data: { results: Array<{ index: number; relevance_score: number }> } =
-          await response.json();
-        return data.results.map((r) => r.index);
+        const data = await response.json();
+        const indices = parseRerankResponse(data);
+        if (!indices) {
+          console.error(
+            "[ERROR] Rerank API response did not include ranked indices; falling back to passthrough",
+          );
+          return passthrough(documents, topN);
+        }
+        return indices.slice(0, topN);
       } catch (err: unknown) {
         if (err instanceof DOMException && err.name === "AbortError") {
           console.error(
-            "[ERROR] Cohere rerank request timed out; falling back to passthrough",
+            "[ERROR] Rerank request timed out; falling back to passthrough",
           );
           return passthrough(documents, topN);
         }
         console.error(
-          "[ERROR] Cohere rerank request failed; falling back to passthrough",
+          "[ERROR] Rerank request failed; falling back to passthrough",
           err,
         );
         return passthrough(documents, topN);
@@ -106,8 +132,8 @@ export async function rerank(
     return passthrough(documents, topN);
   }
 
-  if (RERANKER_PROVIDER === "cohere") {
-    return rerankWithCohere(query, documents, topN);
+  if (["cohere", "maas", "openai-compatible"].includes(RERANKER_PROVIDER)) {
+    return rerankWithHttpProvider(query, documents, topN);
   }
 
   console.warn(

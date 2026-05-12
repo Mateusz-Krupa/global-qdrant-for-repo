@@ -7,6 +7,7 @@ It is project-agnostic: you configure workspace, collection, and repo mappings a
 ## Architecture
 
 - `search_code`: semantic search (optional repo filter)
+- hybrid retrieval combines dense embeddings with Qdrant sparse `bm25` vectors via RRF fusion
 - `get_file`: read files (line-slicing supported)
 - `reindex`: on-demand incremental/full reindex
 - `index_status`: index state + Qdrant point count
@@ -87,6 +88,35 @@ If needed, provide env vars in shell/session before OpenCode start:
 export QDRANT_URL=http://localhost:6333
 export OPENAI_API_KEY=...
 ```
+
+Optional reranker configuration:
+
+```bash
+export RERANKER_PROVIDER=maas
+export RERANKER_URL=https://maas.phoeniqs.com/v1
+export RERANKER_MODEL=inference-bge-reranker
+export RERANKER_API_KEY=...
+```
+
+Supported `RERANKER_PROVIDER` values:
+
+- `none`: disabled, preserves Qdrant result order
+- `cohere`: Cohere-compatible `/rerank` endpoint
+- `maas`: OpenAI-compatible `/rerank` endpoint, using `RERANKER_URL` as the base URL
+- `openai-compatible`: alias for custom `/rerank` providers
+
+The reranker is applied after Qdrant retrieval and only reorders the candidate chunks returned to OpenCode.
+
+## Hybrid Search
+
+The collection uses named vectors:
+
+- `dense`: embedding vector from `EMBEDDER_MODEL`
+- `bm25`: sparse keyword vector with Qdrant `idf` modifier
+
+`search_code` retrieves candidates from both vectors and merges them with Qdrant RRF fusion before the optional reranker runs.
+
+Changing from an older dense-only collection requires a full reindex because the collection schema changes.
 
 ## Git Hooks (post-commit)
 

@@ -8,6 +8,7 @@ import {
   countByRepoAndFilePath,
 } from "./qdrant.js";
 import { embed } from "./embedder.js";
+import { createSparseVector } from "./sparse.js";
 import { chunkFile, makePointId } from "./chunker/index.js";
 import type { Chunk } from "./chunker/index.js";
 import { getRepoState, updateRepoState } from "./state.js";
@@ -151,6 +152,7 @@ async function processFiles(
     const points = allChunks.map((chunk, i) => ({
       id: makePointId(repo, withRepoPrefix(repo, chunk.filePath), chunk.chunkIndex),
       vector: vectors[i],
+      sparseVector: createSparseVector(chunk.text),
       payload: {
         repo: chunk.repo,
         filePath: withRepoPrefix(repo, chunk.filePath),
