@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { extname, join } from "node:path";
 import { parseTsFile } from "./ts-parser.js";
 import { parseJsFile } from "./js-parser.js";
+import { isMemoryPath, parseMemoryFile } from "./md-memory.js";
 
 export interface Chunk {
   text: string;
@@ -16,6 +17,10 @@ export interface Chunk {
   symbolName: string | null;
   symbolType: string | null;
   commitHash: string;
+  /** Partition within the collection. Defaults to code when unset. */
+  kind?: "code" | "memory";
+  /** Extra payload for non-code chunks (memory entries), spread verbatim into Qdrant. */
+  metadata?: Record<string, unknown>;
 }
 
 const SKIP_PATTERNS = [
@@ -160,6 +165,10 @@ export function chunkFile(
   } catch (err) {
     console.error(`[chunker] Failed to read ${fullPath}:`, err);
     return [];
+  }
+
+  if (isMemoryPath(filePath)) {
+    return parseMemoryFile(source, filePath, repo, commitHash);
   }
 
   const ext = extname(filePath);

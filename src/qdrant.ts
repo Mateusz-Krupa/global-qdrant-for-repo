@@ -14,7 +14,9 @@ export function getQdrantClient(): QdrantClient {
   if (!client) {
     const url = process.env.QDRANT_URL || "http://localhost:6333";
     const apiKey = process.env.QDRANT_API_KEY || undefined;
-    client = new QdrantClient(apiKey ? { url, apiKey } : { url });
+    // checkCompatibility=false: the client/server minor-version check only logs
+    // noisy warnings on stderr (which pollutes MCP stdio); we manage versions ourselves.
+    client = new QdrantClient({ url, checkCompatibility: false, ...(apiKey ? { apiKey } : {}) });
   }
   return client;
 }
@@ -55,6 +57,23 @@ export async function ensureCollection(): Promise<void> {
     }
   } catch {
     await qd.createCollection(getCollectionName(), collectionConfig);
+  }
+
+  await ensurePayloadIndexes();
+}
+
+/** Keyword indexes for the fields we filter on. Idempotent — errors mean the index already exists. */
+async function ensurePayloadIndexes(): Promise<void> {
+  const qd = getQdrantClient();
+  for (const field of ["kind", "memoryType", "repo"]) {
+    try {
+      await qd.createPayloadIndex(getCollectionName(), {
+        field_name: field,
+        field_schema: "keyword",
+      });
+    } catch {
+      // already indexed
+    }
   }
 }
 
@@ -118,14 +137,40 @@ export async function deleteByRepo(repo: string): Promise<void> {
   });
 }
 
+export interface SearchFilters {
+  repo?: string;
+  /** Restrict to a partition, e.g. "memory". */
+  kind?: string;
+  /** Restrict memory results to a single type, e.g. "pitfall". */
+  memoryType?: string;
+  /** Drop the "memory" partition (used by code search for a clean split). */
+  excludeMemory?: boolean;
+}
+
+function buildFilter(filters: SearchFilters): Record<string, unknown> | undefined {
+  const must: Array<Record<string, unknown>> = [];
+  if (filters.repo) must.push({ key: "repo", match: { value: filters.repo } });
+  if (filters.kind) must.push({ key: "kind", match: { value: filters.kind } });
+  if (filters.memoryType) must.push({ key: "memoryType", match: { value: filters.memoryType } });
+
+  const mustNot: Array<Record<string, unknown>> = [];
+  if (filters.excludeMemory) mustNot.push({ key: "kind", match: { value: "memory" } });
+
+  if (must.length === 0 && mustNot.length === 0) return undefined;
+  return {
+    ...(must.length ? { must } : {}),
+    ...(mustNot.length ? { must_not: mustNot } : {}),
+  };
+}
+
 export async function search(
   vector: number[],
   sparseVector: SparseVector,
-  repo?: string,
+  filters: SearchFilters = {},
   limit: number = 10,
 ): Promise<Schemas["ScoredPoint"][]> {
   const qd = getQdrantClient();
-  const filter = repo ? { must: [{ key: "repo", match: { value: repo } }] } : undefined;
+  const filter = buildFilter(filters);
   const response = await qd.query(getCollectionName(), {
     prefetch: [
       {

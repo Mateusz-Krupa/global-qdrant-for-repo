@@ -37,14 +37,47 @@ const SKIP_PATTERNS = [
   /(^|[/\\])\.turbo[/\\]/,
 ];
 
-function shouldSkip(filePath: string): boolean {
-  return SKIP_PATTERNS.some((p) => p.test(filePath));
+function escapeRegex(value: string): string {
+  return value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+}
+
+function globToRegExp(pattern: string): RegExp {
+  const normalized = pattern.replace(/\\/g, "/").replace(/^\.\//, "");
+  let regex = normalized.includes("/") ? "^" : "(^|/)";
+
+  for (let i = 0; i < normalized.length; i++) {
+    const char = normalized[i];
+    if (char === "*") {
+      if (normalized[i + 1] === "*") {
+        regex += ".*";
+        i += 1;
+      } else {
+        regex += "[^/]*";
+      }
+    } else if (char === "?") {
+      regex += "[^/]";
+    } else {
+      regex += escapeRegex(char);
+    }
+  }
+
+  regex += "$";
+  return new RegExp(regex);
+}
+
+function shouldSkip(filePath: string, excludePatterns: string[] = []): boolean {
+  const normalizedPath = filePath.replace(/\\/g, "/");
+  return (
+    SKIP_PATTERNS.some((p) => p.test(filePath)) ||
+    excludePatterns.some((pattern) => globToRegExp(pattern).test(normalizedPath))
+  );
 }
 
 export async function getChangedFiles(
   repoPath: string,
   full: boolean,
   lastCommit?: string,
+  excludePatterns: string[] = [],
 ): Promise<Array<{ path: string; status: "A" | "M" | "D" | "R"; oldPath?: string }>> {
   if (full) {
     const output = execSync("git ls-files", {
@@ -54,7 +87,7 @@ export async function getChangedFiles(
     return output
       .trim()
       .split("\n")
-      .filter((line) => line.length > 0 && !shouldSkip(line))
+      .filter((line) => line.length > 0 && !shouldSkip(line, excludePatterns))
       .map((filePath) => ({ path: filePath, status: "A" as const }));
   }
 
@@ -67,14 +100,15 @@ export async function getChangedFiles(
       cwd: repoPath,
       encoding: "utf-8",
     });
-    return parseDiffOutput(output);
+    return parseDiffOutput(output, excludePatterns);
   } catch {
-    return getChangedFiles(repoPath, true);
+    return getChangedFiles(repoPath, true, undefined, excludePatterns);
   }
 }
 
 function parseDiffOutput(
   output: string,
+  excludePatterns: string[] = [],
 ): Array<{ path: string; status: "A" | "M" | "D" | "R"; oldPath?: string }> {
   const lines = output.trim().split("\n").filter((l) => l.length > 0);
   const result: Array<{ path: string; status: "A" | "M" | "D" | "R"; oldPath?: string }> = [];
@@ -90,7 +124,7 @@ function parseDiffOutput(
       status = "R";
       filePath = parts[2];
       const oldPath = parts[1];
-      if (!shouldSkip(filePath)) {
+      if (!shouldSkip(filePath, excludePatterns)) {
         result.push({ path: filePath, status, oldPath });
       }
       continue;
@@ -99,7 +133,7 @@ function parseDiffOutput(
       filePath = parts[1];
     }
 
-    if (!shouldSkip(filePath)) {
+    if (!shouldSkip(filePath, excludePatterns)) {
       result.push({ path: filePath, status });
     }
   }
@@ -165,6 +199,8 @@ async function processFiles(
         symbolName: chunk.symbolName,
         symbolType: chunk.symbolType,
         commitHash: chunk.commitHash,
+        kind: chunk.kind ?? "code",
+        ...(chunk.metadata ?? {}),
       },
     }));
 
@@ -183,6 +219,7 @@ async function processFiles(
 export async function fullReindex(
   repo: string,
   repoPath: string,
+  excludePatterns: string[] = [],
 ): Promise<ReindexResult> {
   await ensureCollection();
 
@@ -193,7 +230,7 @@ export async function fullReindex(
 
   await deleteByRepo(repo);
 
-  const changedFiles = await getChangedFiles(repoPath, true);
+  const changedFiles = await getChangedFiles(repoPath, true, undefined, excludePatterns);
   const filePaths = changedFiles.map((f) => f.path);
 
   const { chunks, pointsUpserted, errors } = await processFiles(
@@ -217,6 +254,7 @@ export async function fullReindex(
 export async function incrementalReindex(
   repo: string,
   repoPath: string,
+  excludePatterns: string[] = [],
 ): Promise<ReindexResult> {
   await ensureCollection();
 
@@ -224,10 +262,10 @@ export async function incrementalReindex(
   const state = getRepoState(repo);
 
   if (!state) {
-    return fullReindex(repo, repoPath);
+    return fullReindex(repo, repoPath, excludePatterns);
   }
 
-  const changedFiles = await getChangedFiles(repoPath, false, state.lastCommit);
+  const changedFiles = await getChangedFiles(repoPath, false, state.lastCommit, excludePatterns);
 
   const addedOrModified = changedFiles.filter(
     (f) => f.status === "A" || f.status === "M" || f.status === "R",
@@ -279,6 +317,7 @@ export async function reindexCommand(
   repoPaths: Record<string, string>,
   repoName?: string,
   full: boolean = false,
+  excludePatterns: string[] = [],
 ): Promise<ReindexResult> {
   if (Object.keys(repoPaths).length === 0) {
     return {
@@ -310,8 +349,8 @@ export async function reindexCommand(
 
     const result =
       full || !getRepoState(name)
-        ? await fullReindex(name, repoPath)
-        : await incrementalReindex(name, repoPath);
+        ? await fullReindex(name, repoPath, excludePatterns)
+        : await incrementalReindex(name, repoPath, excludePatterns);
 
     combined.filesProcessed += result.filesProcessed;
     combined.chunksCreated += result.chunksCreated;

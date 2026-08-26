@@ -6,6 +6,7 @@ export interface RuntimeConfig {
   workspaceRoot: string;
   collectionName: string;
   repoPaths: Record<string, string>;
+  excludePatterns: string[];
 }
 
 interface ParsedArgs {
@@ -32,18 +33,20 @@ export function parseRuntimeArgs(argv: string[]): ParsedArgs {
     "code_chunks";
 
   const repoPairs = parseRepoPairs(globalArgs);
+  const excludePatterns = readOptions(globalArgs, "--exclude");
   const repoPaths: Record<string, string> = {};
   for (const pair of repoPairs) {
     repoPaths[pair.repo] = pair.repoPath;
   }
 
-  validateConfig({ workspaceRoot, collectionName, repoPaths });
+  validateConfig({ workspaceRoot, collectionName, repoPaths, excludePatterns });
 
   return {
     config: {
       workspaceRoot: path.resolve(workspaceRoot),
       collectionName,
       repoPaths,
+      excludePatterns,
     },
     command,
     commandArgs,
@@ -57,6 +60,17 @@ function readOption(args: string[], key: string): string | undefined {
     }
   }
   return undefined;
+}
+
+function readOptions(args: string[], key: string): string[] {
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === key && args[i + 1]) {
+      values.push(args[i + 1]);
+      i += 1;
+    }
+  }
+  return values;
 }
 
 function parseRepoPairs(args: string[]): Array<{ repo: string; repoPath: string }> {

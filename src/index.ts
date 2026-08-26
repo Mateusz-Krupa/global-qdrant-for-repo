@@ -9,13 +9,14 @@ import fs from "node:fs/promises";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { ensureCollection, search, getQdrantClient } from "./qdrant.js";
+import { ensureCollection, search, getQdrantClient, type SearchFilters } from "./qdrant.js";
 import { embed } from "./embedder.js";
 import { createSparseVector } from "./sparse.js";
 import { readIndexState } from "./state.js";
 import { reindexCommand } from "./reindex.js";
 import { rerank } from "./reranker.js";
 import { parseRuntimeArgs, type RuntimeConfig } from "./config.js";
+import { logMemoryRetrieval } from "./telemetry.js";
 
 const runtime = parseRuntimeArgs(process.argv.slice(2));
 const RUNTIME_CONFIG: RuntimeConfig = runtime.config;
@@ -33,6 +34,37 @@ const TOOLS = [
         query: {
           type: "string",
           description: "Natural language search query",
+        },
+        repo: {
+          type: "string",
+          description: "Optional: filter to a specific repository",
+        },
+        limit: {
+          type: "number",
+          minimum: 1,
+          maximum: 50,
+          default: 10,
+          description: "Maximum number of results",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "search_memory",
+    description:
+      "Search project memory: distilled learnings, conventions, pitfalls, decisions, and reusable skills captured from previous OpenSpec changes. Use at the start of a task to retrieve relevant context before implementing.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "Task summary or natural language query describing what you are about to work on",
+        },
+        type: {
+          type: "string",
+          enum: ["architecture", "convention", "pitfall", "decision", "workflow", "learning", "skill"],
+          description: "Optional: restrict to a single memory type",
         },
         repo: {
           type: "string",
@@ -107,6 +139,32 @@ function textBlock(text: string) {
   return { type: "text" as const, text };
 }
 
+function clampLimit(raw: unknown): number {
+  return typeof raw === "number" ? Math.max(1, Math.min(50, raw)) : 10;
+}
+
+/** Embed the query, run hybrid (dense + BM25) search, then rerank down to `limit`. */
+async function retrieve(
+  query: string,
+  filters: SearchFilters,
+  limit: number,
+): Promise<Awaited<ReturnType<typeof search>>> {
+  const vectors = await embed([query]);
+  const sparseVector = createSparseVector(query);
+
+  // Hybrid search with a wider window (3x limit) gives the reranker more candidates.
+  const searchLimit = Math.min(limit * 3, 50);
+  const results = await search(vectors[0], sparseVector, filters, searchLimit);
+  if (results.length === 0) return results;
+
+  const documents = results.map((point, i) => ({
+    text: String((point.payload as Record<string, unknown>).text ?? ""),
+    index: i,
+  }));
+  const rerankedIndices = await rerank(query, documents, limit);
+  return rerankedIndices.map((idx) => results[idx]).filter(Boolean);
+}
+
 async function handleSearchCode(args: Record<string, unknown>) {
   const query = args.query;
   if (typeof query !== "string" || query.trim().length === 0) {
@@ -124,33 +182,8 @@ async function handleSearchCode(args: Record<string, unknown>) {
     };
   }
 
-  const rawLimit = args.limit;
-  let limit = 10;
-  if (typeof rawLimit === "number") {
-    limit = Math.max(1, Math.min(50, rawLimit));
-  }
-
-  const vectors = await embed([query]);
-  const sparseVector = createSparseVector(query);
-
-  // Hybrid search with a wider window (3x limit) gives the reranker more candidates.
-  const searchLimit = Math.min(limit * 3, 50);
-  const results = await search(vectors[0], sparseVector, repo, searchLimit);
-
-  // Rerank if enabled — reranker returns re-ordered indices
-  if (results.length > 0) {
-    const documents = results.map((point, i) => ({
-      text: String((point.payload as Record<string, unknown>).text ?? ""),
-      index: i,
-    }));
-    const rerankedIndices = await rerank(query, documents, limit);
-    // Reorder results based on reranker output
-    const reranked = rerankedIndices
-      .map((idx) => results[idx])
-      .filter(Boolean);
-    results.length = 0;
-    results.push(...reranked);
-  }
+  const limit = clampLimit(args.limit);
+  const results = await retrieve(query, { repo, excludeMemory: true }, limit);
 
   if (results.length === 0) {
     return {
@@ -184,6 +217,103 @@ async function handleSearchCode(args: Record<string, unknown>) {
         snippet,
       ].join("\n"),
     );
+  });
+
+  return { content };
+}
+
+/** Entries unverified for longer than this get a stale warning in results. */
+const STALE_AFTER_DAYS = 60;
+
+const MEMORY_TYPES = new Set([
+  "architecture",
+  "convention",
+  "pitfall",
+  "decision",
+  "workflow",
+  "learning",
+  "skill",
+]);
+
+async function handleSearchMemory(args: Record<string, unknown>) {
+  const query = args.query;
+  if (typeof query !== "string" || query.trim().length === 0) {
+    return { content: [textBlock("Error: query must be a non-empty string.")] };
+  }
+
+  const repo = args.repo as string | undefined;
+  if (repo !== undefined && !RUNTIME_CONFIG.repoPaths[repo]) {
+    return {
+      content: [
+        textBlock(
+          `Error: unknown repo '${repo}'. Configured repos: ${Object.keys(RUNTIME_CONFIG.repoPaths).join(", ")}`,
+        ),
+      ],
+    };
+  }
+
+  const memoryType = args.type as string | undefined;
+  if (memoryType !== undefined && !MEMORY_TYPES.has(memoryType)) {
+    return {
+      content: [
+        textBlock(
+          `Error: unknown type '${memoryType}'. Valid types: ${[...MEMORY_TYPES].join(", ")}`,
+        ),
+      ],
+    };
+  }
+
+  const limit = clampLimit(args.limit);
+  const results = await retrieve(query, { repo, kind: "memory", memoryType }, limit);
+
+  logMemoryRetrieval({
+    ts: new Date().toISOString(),
+    collection: RUNTIME_CONFIG.collectionName,
+    query,
+    type: memoryType ?? null,
+    hits: results.map((r) => {
+      const p = r.payload as Record<string, unknown>;
+      return { id: p.memoryId ?? p.filePath ?? null, type: p.memoryType ?? null, score: r.score ?? null };
+    }),
+  });
+
+  if (results.length === 0) {
+    return {
+      content: [
+        textBlock(
+          "No project memory found. Either nothing relevant has been captured yet, or memory has not been indexed (run reindex).",
+        ),
+      ],
+    };
+  }
+
+  const content = results.map((point) => {
+    const p = point.payload as Record<string, unknown>;
+    const type = String(p.memoryType ?? "note");
+    const id = String(p.memoryId ?? "");
+    const title = String(p.title ?? p.symbolName ?? "");
+    const whenRelevant = p.whenRelevant ? String(p.whenRelevant) : undefined;
+    const lastVerified = p.lastVerified ? String(p.lastVerified) : undefined;
+    const evidence = Array.isArray(p.evidence) ? (p.evidence as unknown[]).map(String) : [];
+    const score = point.score ?? 0;
+    const body = String(p.text ?? "");
+
+    const header = id ? `[${type}] ${id} — ${title}` : `[${type}] ${title}`;
+    const meta: string[] = [];
+    if (whenRelevant) meta.push(`When relevant: ${whenRelevant}`);
+    if (lastVerified) {
+      meta.push(`Last verified: ${lastVerified}`);
+      const ageDays = Math.floor((Date.now() - Date.parse(lastVerified)) / 86_400_000);
+      if (Number.isFinite(ageDays) && ageDays > STALE_AFTER_DAYS) {
+        meta.push(`⚠ stale: unverified for ${ageDays} days — confirm it still holds before relying on it`);
+      }
+    } else {
+      meta.push("⚠ no verification date — confirm it still holds before relying on it");
+    }
+    if (evidence.length > 0) meta.push(`Evidence: ${evidence.join(", ")}`);
+    meta.push(`Score: ${score.toFixed(4)}`);
+
+    return textBlock([header, ...meta, "", body].join("\n"));
   });
 
   return { content };
@@ -239,7 +369,12 @@ async function handleReindex(args: Record<string, unknown>) {
   }
   const full = args.full === true;
 
-  const result = await reindexCommand(RUNTIME_CONFIG.repoPaths, repo, full);
+  const result = await reindexCommand(
+    RUNTIME_CONFIG.repoPaths,
+    repo,
+    full,
+    RUNTIME_CONFIG.excludePatterns,
+  );
 
   const lines: string[] = [];
   lines.push(`Files processed: ${result.filesProcessed}`);
@@ -303,6 +438,8 @@ async function startMcpServer() {
       switch (name) {
         case "search_code":
           return await handleSearchCode(toolArgs);
+        case "search_memory":
+          return await handleSearchMemory(toolArgs);
         case "get_file":
           return await handleGetFile(toolArgs);
         case "reindex":
@@ -354,7 +491,12 @@ async function runCli(args: string[]) {
       process.exit(1);
     }
 
-    const result = await reindexCommand(RUNTIME_CONFIG.repoPaths, repo, full);
+    const result = await reindexCommand(
+      RUNTIME_CONFIG.repoPaths,
+      repo,
+      full,
+      RUNTIME_CONFIG.excludePatterns,
+    );
     console.log(`Reindex complete`);
     console.log(`  Files processed: ${result.filesProcessed}`);
     console.log(`  Chunks created: ${result.chunksCreated}`);
