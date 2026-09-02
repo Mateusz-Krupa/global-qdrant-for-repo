@@ -1,4 +1,4 @@
-import { basename, extname } from "node:path";
+import { basename, dirname, extname } from "node:path";
 import type { Chunk } from "./index.js";
 
 /**
@@ -157,6 +157,29 @@ function parseFrontmatter(source: string): { name?: string; description?: string
   return result;
 }
 
+/**
+ * Learnings are the episodic record of one archived change. Their `##`
+ * headings are report sections (Intent vs outcome, Problems, Memory impact…),
+ * not knowledge entries — so the file is indexed as a single unit, titled and
+ * id'd after the change it belongs to.
+ */
+function parseLearningsFile(
+  source: string,
+  filePath: string,
+  repo: string,
+  commitHash: string,
+): Chunk[] {
+  const changeName = basename(dirname(filePath));
+  const heading = source.match(/^#\s+(.+)$/m);
+  const metadata: MemoryMetadata = {
+    memoryType: "learning",
+    memoryId: slug(changeName),
+    title: heading ? heading[1].trim() : `Learnings — ${changeName}`,
+  };
+  const lineCount = source.split("\n").length;
+  return [makeChunk(source, filePath, repo, commitHash, 1, lineCount, 0, metadata)];
+}
+
 /** Skills are indexed as a single unit — a procedure only makes sense whole. */
 function parseSkillFile(
   source: string,
@@ -190,6 +213,9 @@ export function parseMemoryFile(
 ): Chunk[] {
   if (basename(filePath).toLowerCase() === "skill.md") {
     return parseSkillFile(source, filePath, repo, commitHash);
+  }
+  if (basename(filePath).toLowerCase() === "learnings.md") {
+    return parseLearningsFile(source, filePath, repo, commitHash);
   }
 
   const memoryType = memoryTypeForPath(filePath);

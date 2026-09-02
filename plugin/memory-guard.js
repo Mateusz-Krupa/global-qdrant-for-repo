@@ -64,6 +64,27 @@ export const MemoryGuard = async ({ directory }) => {
         inflight.delete(input.callID);
         if (!cmd || typeof output?.output !== "string") return;
 
+        const mv = cmd.match(ARCHIVE_MV);
+        if (mv) {
+          // archive succeeded — nudge curation once memory grows past the threshold
+          let entries = 0;
+          try {
+            const memDir = path.join(root, "openspec", "memory");
+            for (const f of fs.readdirSync(memDir)) {
+              if (!f.endsWith(".md") || f === "index.md") continue;
+              const text = fs.readFileSync(path.join(memDir, f), "utf-8");
+              entries += (text.replace(/<!--[\s\S]*?-->/g, "").match(/^## /gm) ?? []).length;
+            }
+          } catch {
+            entries = 0;
+          }
+          if (entries >= 70) {
+            output.output +=
+              `\n\n[memory-guard] Project memory has ${entries} entries — retrieval precision degrades without curation. Run /memory-review to merge duplicates, refresh stale entries, and drop dead weight.`;
+          }
+          return;
+        }
+
         if (/openspec\s+new\s+change/.test(cmd)) {
           output.output +=
             "\n\n[memory-guard] Before writing artifacts: call search_memory with a one-line task summary " +
