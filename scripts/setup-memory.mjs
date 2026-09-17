@@ -134,6 +134,7 @@ const hook = `#!/usr/bin/env bash
 ${HOOK_MARKER}
 # Incremental qdrant reindex after each commit (code + openspec/memory).
 # Pinned to node v22 LTS — newer node (26.x) breaks the Qdrant client (undici).
+unset NODE_OPTIONS   # inherited preloads (IDE/agent harnesses) can crash node
 NODE=${NODE22}
 [ -x "$NODE" ] || NODE=$(command -v node)
 "$NODE" ${path.join(TOOL_DIR, "dist", "index.js")} \\
