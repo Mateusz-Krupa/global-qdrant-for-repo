@@ -175,6 +175,8 @@ function parseLearningsFile(
     memoryType: "learning",
     memoryId: slug(changeName),
     title: heading ? heading[1].trim() : `Learnings — ${changeName}`,
+    // pick up **Last verified:** / **Evidence:** etc. if the learnings body carries them
+    ...parseFields(source),
   };
   const lineCount = source.split("\n").length;
   return [makeChunk(source, filePath, repo, commitHash, 1, lineCount, 0, metadata)];

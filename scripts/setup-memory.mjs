@@ -113,7 +113,11 @@ for retrieval (agents query \`search_memory\` instead) — keep it as a reviewab
 `,
   "architecture.md": template("Architecture", "ARCH"),
   "conventions.md": template("Conventions", "CONV"),
-  "pitfalls.md": template("Pitfalls", "PIT"),
+  "pitfalls.md": template(
+    "Pitfalls",
+    "PIT",
+    "**Check:** the concrete verification scenario that catches it (e.g. Save → Exit → re-enter; save A while B is unsaved)\n",
+  ),
   "decisions.md": template("Decisions", "DEC"),
   "workflows.md": template("Workflows", "WF", "\nA workflow that grows large / broadly reusable should graduate to a skill.\n"),
 };

@@ -9,7 +9,7 @@ import fs from "node:fs/promises";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { ensureCollection, search, getQdrantClient, type SearchFilters } from "./qdrant.js";
+import { ensureCollection, search, findByMemoryId, getQdrantClient, type SearchFilters } from "./qdrant.js";
 import { embed } from "./embedder.js";
 import { createSparseVector } from "./sparse.js";
 import { readIndexState } from "./state.js";
@@ -264,13 +264,23 @@ async function handleSearchMemory(args: Record<string, unknown>) {
   }
 
   const limit = clampLimit(args.limit);
-  const results = await retrieve(query, { repo, kind: "memory", memoryType }, limit);
+
+  // ID fast-path: an exact entry id (e.g. "PIT-122") must return THAT entry, not
+  // thematically-similar ones. Try an exact memoryId lookup first; fall back to
+  // semantic search when the query is prose or the id isn't found.
+  const idMatch = query.trim().match(/^([A-Za-z]{2,5}-\d+)$/);
+  let results = idMatch ? await findByMemoryId(idMatch[1].toUpperCase(), repo) : [];
+  const viaId = results.length > 0;
+  if (!viaId) {
+    results = await retrieve(query, { repo, kind: "memory", memoryType }, limit);
+  }
 
   logMemoryRetrieval({
     ts: new Date().toISOString(),
     collection: RUNTIME_CONFIG.collectionName,
     query,
     type: memoryType ?? null,
+    viaId,
     hits: results.map((r) => {
       const p = r.payload as Record<string, unknown>;
       return { id: p.memoryId ?? p.filePath ?? null, type: p.memoryType ?? null, score: r.score ?? null };
@@ -301,13 +311,17 @@ async function handleSearchMemory(args: Record<string, unknown>) {
     const header = id ? `[${type}] ${id} — ${title}` : `[${type}] ${title}`;
     const meta: string[] = [];
     if (whenRelevant) meta.push(`When relevant: ${whenRelevant}`);
+    // Learnings are point-in-time episodic records, not maintained facts — they never go
+    // "stale" and need no verification date. Stale/no-date warnings apply only to the
+    // canonical, maintained entry types.
+    const isEpisodic = type === "learning";
     if (lastVerified) {
       meta.push(`Last verified: ${lastVerified}`);
       const ageDays = Math.floor((Date.now() - Date.parse(lastVerified)) / 86_400_000);
-      if (Number.isFinite(ageDays) && ageDays > STALE_AFTER_DAYS) {
+      if (!isEpisodic && Number.isFinite(ageDays) && ageDays > STALE_AFTER_DAYS) {
         meta.push(`⚠ stale: unverified for ${ageDays} days — confirm it still holds before relying on it`);
       }
-    } else {
+    } else if (!isEpisodic) {
       meta.push("⚠ no verification date — confirm it still holds before relying on it");
     }
     if (evidence.length > 0) meta.push(`Evidence: ${evidence.join(", ")}`);

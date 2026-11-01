@@ -32,6 +32,22 @@ const APPLY_RETRIEVAL = `5. **Retrieve project memory (context pack)** — *requ
 const APPLY_NOTES_BULLET = `   - When you make a non-obvious decision, reject an approach, or hit a trap, append a one-line note to \`openspec/changes/<name>/notes.md\` (create it if missing) — raw material for archive reflection
 `;
 
+const APPLY_DEFERRED_BULLET = `   - Before proposing a fix or review follow-up, check \`notes.md\`: items recorded as deliberately deferred for this change are settled — do not re-propose them
+`;
+
+// Archive step d refinements: memory quality over memory quantity.
+const DISTILL_BULLET = `   - **Distill, don't archive.** \`learnings.md\` is the episode; memory holds the rule. Turn each reusable learning into a SHORT canonical entry (1–3 sentences: the rule + why), not a summary of the task. If a close workflow/entry already exists, UPDATE it with the new evidence instead of adding a near-twin.
+`;
+
+const CHECK_BULLET = `   - **Make pitfalls testable.** A pitfall entry should carry a \`**Check:**\` line with the concrete verification scenario that catches it (e.g. \`Save → Exit → re-enter; save section A while B is unsaved; Save → CSV export without reload\`). A warning that only names a topic ("beware form reset") does not change behavior — rewrite it as a check.
+`;
+
+const SCOPE_BULLET = `   - **Keep change-scoped decisions local.** Review findings deliberately deferred, risks accepted only for this change, and ticket-specific trade-offs stay in \`learnings.md\`/\`notes.md\`, tagged with the change/ticket — never promoted as a general rule ("we skip such edge cases"). Within the same change, deferred items recorded in \`notes.md\` must not be re-proposed.
+`;
+
+const IMPACT_OLD = "   - **Memory impact**: one line per memory retrieved during this change — did it actually help (how?) or was it noise? Write `memory impact: none retrieved` if retrieval was skipped or empty. This is the ground truth for measuring whether the memory system pays off.\n";
+const IMPACT_NEW = "   - **Memory impact**: one line per memory retrieved during this change — name the concrete effect: which **decision it changed** or which **test/check it added** (e.g. \"PIT-104 → added Save→Exit→re-enter e2e case\"). \"Helped\" without a concrete decision or test does not count — write `no effect` instead. Write `memory impact: none retrieved` if retrieval was skipped or empty.\n";
+
 const ARCHIVE_REFLECTION = `5. **Reflect and update project memory** *(learning trigger — runs before the move, so \`learnings.md\` travels into the archive with the change)*
 
    **a. Ensure the memory store exists.** If \`openspec/memory/\` is missing, create it with one file per category, each starting with a \`# <Category>\` header: \`architecture.md\`, \`conventions.md\`, \`pitfalls.md\`, \`decisions.md\`, \`workflows.md\` (plus an \`index.md\` table of contents). This is self-bootstrapping — every archived change leaves the project a little smarter.
@@ -43,11 +59,11 @@ const ARCHIVE_REFLECTION = `5. **Reflect and update project memory** *(learning 
    - Problems / wrong turns, and the corrections that worked
    - Decisions made and why; user corrections to how the work was done
    - Classify each learning: **local** (one-off — do not promote) / **project** (reusable knowledge) / **procedural** (repeatable how-to)
-   - **Memory impact**: one line per memory retrieved during this change — did it actually help (how?) or was it noise? Write \`memory impact: none retrieved\` if retrieval was skipped or empty. This is the ground truth for measuring whether the memory system pays off.
+   - **Memory impact**: one line per memory retrieved during this change — name the concrete effect: which **decision it changed** or which **test/check it added** (e.g. "PIT-104 → added Save→Exit→re-enter e2e case"). "Helped" without a concrete decision or test does not count — write \`no effect\` instead. Write \`memory impact: none retrieved\` if retrieval was skipped or empty.
 
-   **d. Propose project-memory operations.** For each *project* / *procedural* learning, pick one: \`ADD\` · \`UPDATE\` (new evidence or refinement of an existing entry) · \`MERGE\` (consolidate overlapping entries) · \`IGNORE\`. Prefer compression over appending. Use the \`## <ID>: <title>\` entry format from the category files. Every promoted entry MUST carry \`**Evidence:**\` (this archive's path) and \`**Last verified:**\` (today's date).
+   **d. Propose project-memory operations.** For each *project* / *procedural* learning, pick one: \`ADD\` · \`UPDATE\` (new evidence or refinement of an existing entry) · \`MERGE\` (consolidate overlapping entries) · \`IGNORE\`. Prefer compression over appending. Use the \`## <ID>: <title>\` entry format from the category files. Every promoted entry MUST carry \`**Evidence:**\` (this archive's path) and \`**Last verified:**\` (today's date, YYYY-MM-DD).
    - Before proposing \`ADD\`: run \`search_memory\` with the candidate's learning text (limit 3). If an existing entry is a close match, propose \`UPDATE\`/\`MERGE\` of that entry instead of a new \`ADD\`.
-   - Never promote: one-off details, secrets/tokens, tool noise, or anything the final code contradicts.
+${DISTILL_BULLET}${CHECK_BULLET}${SCOPE_BULLET}   - Never promote: one-off details, secrets/tokens, tool noise, or anything the final code contradicts.
    - If a learning contradicts an existing entry, mark it \`CONFLICT\` and propose an UPDATE for review — do not silently overwrite.
 
    **e. Show the diff and confirm.** Present the proposed changes (\`learnings.md\` + \`openspec/memory/*.md\`) as a normal file diff and ask: **\`Apply? [yes / edit / no]\`**. Apply only what the user accepts. Committed memory is picked up by the qdrant reindex (git hook or manual), so the next change retrieves it.
@@ -99,6 +115,9 @@ function patchApply(text, warnings) {
       warnings,
     );
   }
+  if (!text.includes("deliberately deferred for this change")) {
+    text = replaceOnce(text, APPLY_NOTES_BULLET, APPLY_NOTES_BULLET + APPLY_DEFERRED_BULLET, "apply deferred bullet", warnings);
+  }
   return text;
 }
 
@@ -140,6 +159,24 @@ function patchArchive(text, warnings) {
         "   - Classify each learning: **local** (one-off — do not promote) / **project** (reusable knowledge) / **procedural** (repeatable how-to)\n" +
           "   - **Memory impact**: one line per memory retrieved during this change — did it actually help (how?) or was it noise? Write `memory impact: none retrieved` if retrieval was skipped or empty. This is the ground truth for measuring whether the memory system pays off.\n",
         "archive memory-impact bullet",
+        warnings,
+      );
+    }
+    // impact metric: "did it change a decision / add a test", not "helped"
+    if (text.includes(IMPACT_OLD)) {
+      text = text.replace(IMPACT_OLD, IMPACT_NEW);
+    }
+    // quality refinements to step d (distill, testable pitfalls, change-scoped decisions)
+    const qualityBullets =
+      (text.includes("Distill, don't archive") ? "" : DISTILL_BULLET) +
+      (text.includes("Make pitfalls testable") ? "" : CHECK_BULLET) +
+      (text.includes("Keep change-scoped decisions local") ? "" : SCOPE_BULLET);
+    if (qualityBullets) {
+      text = replaceOnce(
+        text,
+        "   - Never promote: one-off details",
+        qualityBullets + "   - Never promote: one-off details",
+        "archive quality bullets",
         warnings,
       );
     }

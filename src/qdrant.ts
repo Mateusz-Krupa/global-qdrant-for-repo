@@ -163,6 +163,31 @@ function buildFilter(filters: SearchFilters): Record<string, unknown> | undefine
   };
 }
 
+/**
+ * Exact lookup of a memory entry by its id (e.g. "PIT-122"). Used as a fast-path
+ * before semantic search: asking for a specific id must return THAT entry, not
+ * thematically-similar stories. Returns [] when nothing matches that id.
+ */
+export async function findByMemoryId(
+  memoryId: string,
+  repo?: string,
+): Promise<Schemas["ScoredPoint"][]> {
+  const qd = getQdrantClient();
+  const must: Array<Record<string, unknown>> = [
+    { key: "kind", match: { value: "memory" } },
+    { key: "memoryId", match: { value: memoryId } },
+  ];
+  if (repo) must.push({ key: "repo", match: { value: repo } });
+  const res = await qd.scroll(getCollectionName(), {
+    filter: { must },
+    limit: 5,
+    with_payload: true,
+    with_vector: false,
+  });
+  // shape like ScoredPoint (score 1 = exact id hit) so callers can treat results uniformly
+  return (res.points ?? []).map((p) => ({ ...p, score: 1 }) as Schemas["ScoredPoint"]);
+}
+
 export async function search(
   vector: number[],
   sparseVector: SparseVector,
