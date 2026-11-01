@@ -90,19 +90,24 @@ function parseFields(body: string): Pick<MemoryMetadata, "whenRelevant" | "evide
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
 
-    const whenRelevant = line.match(/^\*\*When relevant:?\*\*\s*(.*)$/i);
+    // Field labels are accepted bold or plain, optionally as a list item
+    // ("**Last verified:** x", "Last verified: x.", "- Last verified: x").
+    const whenRelevant = line.match(/^(?:[-*]\s+)?(?:\*\*)?When relevant:?(?:\*\*)?:?\s*(.*)$/i);
     if (whenRelevant && whenRelevant[1]) {
       fields.whenRelevant = whenRelevant[1].trim();
       continue;
     }
 
-    const lastVerified = line.match(/^\*\*Last verified:?\*\*\s*(.*)$/i);
+    const lastVerified = line.match(/^(?:[-*]\s+)?(?:\*\*)?Last verified:?(?:\*\*)?:?\s*(.*)$/i);
     if (lastVerified && lastVerified[1]) {
-      fields.lastVerified = lastVerified[1].trim();
+      // normalize to YYYY-MM-DD; a later re-check line wins over an earlier one
+      const date = lastVerified[1].match(/\d{4}-\d{2}-\d{2}/);
+      if (date) fields.lastVerified = date[0];
       continue;
     }
 
-    if (/^\*\*Evidence:?\*\*/i.test(line)) {
+    // "**Evidence:**", "**Evidence (additional):**", "Evidence:" — label must end the line
+    if (/^(?:\*\*)?Evidence[^:]*:(?:\*\*)?\s*$/i.test(line)) {
       const evidence: string[] = [];
       for (let j = i + 1; j < lines.length; j++) {
         const bullet = lines[j].trim().match(/^[-*]\s+(.+)$/);
