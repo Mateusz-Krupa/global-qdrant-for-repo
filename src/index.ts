@@ -265,22 +265,29 @@ async function handleSearchMemory(args: Record<string, unknown>) {
 
   const limit = clampLimit(args.limit);
 
-  // ID fast-path: an exact entry id (e.g. "PIT-122") must return THAT entry, not
-  // thematically-similar ones. Try an exact memoryId lookup first; fall back to
-  // semantic search when the query is prose or the id isn't found.
-  const idMatch = query.trim().match(/^([A-Za-z]{2,5}-\d+)$/);
-  let results = idMatch ? await findByMemoryId(idMatch[1].toUpperCase(), repo) : [];
-  const viaId = results.length > 0;
-  if (!viaId) {
-    results = await retrieve(query, { repo, kind: "memory", memoryType }, limit);
+  // ID lookup: entry ids always follow `PREFIX-123` (PIT-122, WF-106), so every id
+  // named anywhere in the query is fetched exactly and pinned first. A bare-id query
+  // returns only that entry; prose around the ids is still searched semantically.
+  // Ids that match nothing (e.g. ticket keys like MSDG-121) are simply skipped.
+  const ids = [...new Set((query.match(/\b[A-Za-z]{2,5}-\d+\b/g) ?? []).map((id) => id.toUpperCase()))];
+  const idHits = (await Promise.all(ids.map((id) => findByMemoryId(id, repo)))).flat();
+  const bareId = ids.length === 1 && query.trim().toUpperCase() === ids[0];
+  let results = idHits;
+  if (!(bareId && idHits.length > 0)) {
+    const pinned = new Set(idHits.map((r) => r.id));
+    const semantic = await retrieve(query, { repo, kind: "memory", memoryType }, limit);
+    results = [...idHits, ...semantic.filter((r) => !pinned.has(r.id))].slice(0, Math.max(limit, idHits.length));
   }
+  const viaId = idHits.length > 0;
 
   logMemoryRetrieval({
     ts: new Date().toISOString(),
     collection: RUNTIME_CONFIG.collectionName,
+    repo: repo ?? null,
     query,
     type: memoryType ?? null,
     viaId,
+    idHits: idHits.map((r) => (r.payload as Record<string, unknown>).memoryId ?? null),
     hits: results.map((r) => {
       const p = r.payload as Record<string, unknown>;
       return { id: p.memoryId ?? p.filePath ?? null, type: p.memoryType ?? null, score: r.score ?? null };
